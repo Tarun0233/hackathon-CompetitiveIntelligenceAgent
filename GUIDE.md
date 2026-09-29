@@ -386,10 +386,21 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
+Verify the install before seeding or running — these tests are fully offline, so
+a pass proves the Python environment works without needing valid API keys:
+
+```bash
+.\.venv\Scripts\python.exe -m pytest -q     # expected: 18 passed
+```
+
 If `.venv` was copied from another machine and `.\.venv\Scripts\python.exe`
 reports *"did not find executable at C:\Python314\python.exe"*, the venv still
 points at the base interpreter it was built against. Delete `.venv` and
 recreate it with the two commands above — that error is not fixable in place.
+
+`.env` must be filled in before `seed_hindsight.py` or the first analysis. Both
+`seed_hindsight.py` and `server.py` fail with an explicit message naming the
+missing key, so a failure here means `.env` is absent or incomplete.
 
 ### API surface
 

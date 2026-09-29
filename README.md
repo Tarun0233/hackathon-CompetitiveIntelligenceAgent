@@ -63,7 +63,20 @@ Fill in `.env`:
 | `HINDSIGHT_API_KEY` | [ui.hindsight.vectorize.io](https://ui.hindsight.vectorize.io) → Billing → apply promo `MEMHACK99` for $50 free credit → Create API Key |
 | `GROQ_API_KEY` | [groq.com](https://groq.com) (free tier) |
 
+Then check your install before going any further:
+
+```bash
+.\.venv\Scripts\python.exe -m pytest -q
+```
+
+Expected: **18 passed**. These tests are fully offline — they don't call Hindsight or
+Groq and don't need valid keys, so a pass confirms your Python environment is sound. If
+they fail, the problem is the install, not your credentials.
+
 ### 2. Seed the memory banks
+
+**Requires a filled-in `.env`** — seeding talks to Hindsight, and without
+`HINDSIGHT_API_KEY` it exits with a message naming the missing key.
 
 Each memory stage is a separate Hindsight bank:
 
