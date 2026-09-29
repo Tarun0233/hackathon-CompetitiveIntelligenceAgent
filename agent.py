@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 from hindsight_client import Hindsight
 from openai import OpenAI
 
+import dri
 from synthetic_data import COMPANY
 
 load_dotenv()
@@ -38,18 +39,20 @@ You receive a NEW competitor event and numbered MEMORIES recalled from the compa
 
 Rules:
 - Cite only memories you were given, by id (M1, M2, ...). Never invent past events, numbers or outcomes.
-- If no memory is a close precedent for this kind of move, set has_direct_precedent to false and say so plainly.
+- If no memory is a close precedent for this kind of move, say so plainly in the recommendation.
 - Learn from both failed and successful past outcomes.
 - Keep general strategy reasoning separate from memory evidence.
 - If there are no memories at all, give sensible general advice and set confidence to "low".
 
 Reply with ONLY a JSON object:
-{{"has_direct_precedent": true|false,
- "confidence": "high"|"medium"|"low",
+{{"confidence": "high"|"medium"|"low",
  "recommendation": "2-4 sentences",
  "evidence": [{{"memory": "M1", "why": "how it shapes the advice"}}],
  "general_reasoning": "what comes from general strategy, not from memory",
  "avoid": "one thing not to do, or empty string"}}
+
+Note: whether this event has a direct precedent is decided by a measured
+relevance score, not by you. Do not output has_direct_precedent.
 """
 
 
@@ -102,7 +105,14 @@ def _is_missing_bank(err: Exception) -> bool:
     return False
 
 
-def _recall_raw(stage: str, query: str, limit: int) -> list[str]:
+def _recall_scored(stage: str, query: str, limit: int) -> list[tuple[str, float | None]]:
+    """Recall memories together with the reranker score Hindsight assigned.
+
+    The scores travel with the text so the caller can judge precedent from the
+    very same recall the model reasons over, instead of issuing a second recall
+    and getting a different answer.
+    """
+
     try:
         result = hindsight().recall(
             bank_id=bank_for(stage),
@@ -115,38 +125,77 @@ def _recall_raw(stage: str, query: str, limit: int) -> list[str]:
 
         raise
 
-    return [m.text for m in result.results[:limit]]
+    return [
+        (m.text, _reranker_score(m))
+        for m in result.results[:limit]
+    ]
+
+
+def _reranker_score(memory: object) -> float | None:
+    """Pull the reranker score off a Hindsight result, tolerating shape changes."""
+
+    scores = getattr(memory, "scores", None)
+
+    if isinstance(scores, dict):
+        value = scores.get("reranker")
+    else:
+        value = getattr(scores, "reranker", None)
+
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _recall_raw(stage: str, query: str, limit: int) -> list[str]:
+    return [text for text, _ in _recall_scored(stage, query, limit)]
 
 
 def recall(stage: str, query: str, limit: int = 12) -> list[str]:
     """Recall relevant events and Dhan Mart's historical outcomes."""
 
-    primary = _recall_raw(
-        stage,
-        query,
-        limit,
-    )
+    memories, _ = recall_with_precedent(stage, query, limit)
+
+    return memories
+
+
+def recall_with_precedent(
+    stage: str,
+    query: str,
+    limit: int = 12,
+) -> tuple[list[str], float]:
+    """Recall memories and report the strongest precedent score among them.
+
+    Returns the merged, de-duplicated memory list the model will reason over and
+    the maximum reranker score observed across both queries. The DRI reuses this
+    exact score so the headline badge and the reliability number describe the
+    same evidence instead of two independent retrievals.
+    """
+
+    primary = _recall_scored(stage, query, limit)
 
     outcomes_query = (
         f"{COMPANY['name']}'s own past responses to "
         f"{COMPANY['competitor']} and whether each one succeeded or failed"
     )
 
-    secondary = _recall_raw(
-        stage,
-        outcomes_query,
-        limit,
-    )
+    secondary = _recall_scored(stage, outcomes_query, limit)
 
-    merged = []
-    seen = set()
+    merged: list[str] = []
+    seen: set[str] = set()
+    scores: list[float] = []
 
-    for memory in primary + secondary:
-        if memory not in seen:
-            seen.add(memory)
-            merged.append(memory)
+    for text, score in primary + secondary:
+        if score is not None:
+            scores.append(score)
 
-    return merged
+        if text not in seen:
+            seen.add(text)
+            merged.append(text)
+
+    precedent = max(0.0, min(1.0, max(scores, default=0.0)))
+
+    return merged, precedent
 
 
 _groq: OpenAI | None = None
@@ -232,10 +281,24 @@ def analyze(
     event: str,
     recall_fn=recall,
     llm_fn=ask_llm,
+    precedent: float | None = None,
+    memories: list[str] | None = None,
 ) -> Plan:
-    """Recall company memory and generate a counter-plan."""
+    """Recall company memory and generate a counter-plan.
 
-    memories = recall_fn(stage, event)
+    `memories` and `precedent` let a caller that has already recalled this exact
+    event hand both over, so the plan and its DRI describe one retrieval rather
+    than two. When `precedent` is supplied, has_direct_precedent is derived from
+    it instead of taken from the model, so the badge cannot contradict the score.
+    """
+
+    if memories is None:
+        if precedent is None and recall_fn is recall:
+            memories, precedent = recall_with_precedent(stage, event)
+        else:
+            memories = recall_fn(stage, event)
+    else:
+        memories = list(memories)
 
     block = (
         "\n".join(
@@ -287,10 +350,7 @@ def analyze(
                 }
             )
 
-    precedent = (
-        bool(data.get("has_direct_precedent"))
-        and bool(evidence)
-    )
+    precedent_found = dri.has_precedent(precedent)
 
     confidence = data.get("confidence", "low")
 
@@ -301,7 +361,7 @@ def analyze(
         confidence = "medium"
 
     return Plan(
-        precedent,
+        precedent_found,
         confidence,
         data.get("recommendation", ""),
         data.get("general_reasoning", ""),

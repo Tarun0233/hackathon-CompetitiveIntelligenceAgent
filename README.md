@@ -26,7 +26,7 @@ This agent remembers **your own trial and error**, not just the competitor's act
 | 🔴 **Cold** — no memory | 🟢 **Full** — full history |
 |---|---|
 | ![Cold stage](docs/cold.png) | ![Full stage](docs/full.png) |
-| DRI **0/100** · 0 memories<br>"Launch a targeted promotion with modest discounts (5–7%)" | DRI **43/100** · 22 memories recalled, 4 cited<br>**"Do not match Sitara's 10% discount"** |
+| DRI **0/100** · 0 memories<br>"Launch a targeted promotion with modest discounts (5–7%)" | DRI **78/100** · 19 memories recalled, 3 cited<br>**"Do not match the 10% Festival Fest cuts"** |
 
 </div>
 
@@ -121,6 +121,12 @@ It's regex-based and deterministic rather than LLM-based, so the number stays fa
 reproducible instead of adding latency and noise to something the UI presents as a
 measurement.
 
+**One recall, one truth.** The plan and its DRI are computed from a *single* Hindsight
+retrieval. The `Direct precedent found` / `No direct precedent` badge is derived from the
+same measured `P` (threshold `0.60`) rather than from the model's opinion, so the badge and
+the score can never contradict each other. The model writes the recommendation, reasoning
+and `avoid` line — it does not adjudicate retrieval quality.
+
 ## Architecture
 
 ```
@@ -171,6 +177,8 @@ actually used as evidence.
 | `frontend/` | React 18 + Vite + TypeScript UI. |
 | `synthetic_data.py` | 18 dated memory records + demo competitor events. |
 | `seed_hindsight.py` | Populates the per-stage memory banks. |
+| `test_dri.py` | Offline tests for DRI scoring and badge/score consistency. No API keys needed. |
+| `recall_probe.py` | Manual recall probe against live Hindsight. Script, not a pytest file. |
 | `GUIDE.md` | Full build & test guide — architecture, test plan, verified outputs, rubric mapping. |
 
 ## Try these prompts

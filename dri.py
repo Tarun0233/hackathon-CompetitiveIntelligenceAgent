@@ -12,20 +12,33 @@ load_dotenv()
 
 BASE_BANK = os.getenv("HINDSIGHT_BANK_ID", "competitive-intel-demo")
 
-_DECISION_PATTERNS = (
-    r"\bdhan mart\s+(?:decided|chose|selected|adopted|rejected|implemented|tested|piloted|launched|introduced|responded|countered|investigated|opted)\b",
-    r"\bdhan mart\s+(?:will|would|did)\s+(?:run|test|pilot|match|target|focus|use|offer|launch|continue|expand|avoid|maintain|investigate)\b",
-    r"\bdhan mart\s+(?:implemented|tested|piloted|introduced|launched)\b",
+# Verbs are listed in base form and given an optional inflection suffix, because
+# recalled memory is natural language: the dataset says "Dhan Mart matched
+# them", "Dhan Mart put 'Price Promise' boards", "Dhan Mart rushed an in-house
+# pilot". Matching only base forms silently missed 3 of the 4 real decisions and
+# made the Outcome component of the DRI wrong.
+_VERB = (
+    r"(?:decided|chose|chosen|selected|adopted|rejected|rejects?|"
+    r"implement(?:ed|s)?|test(?:ed|s)?|piloted|pilot(?:ed|s)?|"
+    r"launch(?:ed|es)?|introduc(?:ed|es)|respond(?:ed|s)?|counter(?:ed|s)?|"
+    r"investigat(?:ed|es)|opted|match(?:ed|es)?|match(?:ing)?|"
+    r"put|puts|rush(?:ed|es)?|countering)"
 )
 
+_DECISION_PATTERNS = (
+    rf"\bdhan mart\s+{_VERB}",
+    r"\bdhan mart\s+(?:will|would|did)\s+"
+    r"(?:run|test|pilot|match|target|focus|use|offer|launch|continue|expand|avoid|maintain|investigate)",
+)
+
+# Substring markers, so a base form covers its inflections: "success" matches
+# "SUCCESS"/"successful"/"successfully", "fail" matches "FAILED"/"failure".
 _OUTCOME_MARKERS = (
     "outcome:",
     "resulted in",
     "result:",
-    "successful",
-    "successfully",
-    "failed",
-    "failure",
+    "success",
+    "fail",
     "profit",
     "profitable",
     "loss",
@@ -87,6 +100,90 @@ def _has_outcome(text: str) -> bool:
     return any(marker in lowered for marker in _OUTCOME_MARKERS)
 
 
+# One threshold decides both the headline badge and the score. Previously the
+# badge came from the model's opinion while the score came from the measured
+# reranker score, so the UI could show "No direct precedent" next to a DRI of
+# 74. Deriving both from the same measured value makes them impossible to
+# disagree.
+PRECEDENT_THRESHOLD = 0.60
+
+
+def has_precedent(precedent: float) -> bool:
+    """Whether a measured precedent score counts as a direct precedent."""
+    return precedent >= PRECEDENT_THRESHOLD
+
+
+def _precedent(results: list[Any]) -> float:
+    """Highest reranker score in the recall set, clamped to 0..1."""
+    scores = [s for s in (_score(r, "reranker") for r in results) if s is not None]
+    return max(0.0, min(1.0, max(scores, default=0.0)))
+
+
+def _outcome(results: list[Any]) -> tuple[float, int, int]:
+    """Fraction of decision-bearing memories that also carry outcome evidence."""
+    decision_count = 0
+    outcome_count = 0
+
+    for result in results:
+        text = _text(result)
+
+        if not text or not _has_decision(text):
+            continue
+
+        decision_count += 1
+
+        if _has_outcome(text):
+            outcome_count += 1
+
+    ratio = (outcome_count / decision_count) if decision_count else 0.0
+
+    return max(0.0, min(1.0, ratio)), decision_count, outcome_count
+
+
+def _build(
+    precedent: float, outcome: float, decision_count: int, outcome_count: int
+) -> dict[str, Any]:
+    return {
+        "score": round(100 * (0.6 * precedent + 0.4 * outcome)),
+        "precedent": precedent,
+        "outcome": outcome,
+        "has_direct_precedent": has_precedent(precedent),
+        "decision_memories": decision_count,
+        "outcome_memories": outcome_count,
+    }
+
+
+def score_memories(memories: list[str], precedent: float) -> dict[str, Any]:
+    """Score an already-recalled memory set.
+
+    The agent and the DRI used to recall the same query twice and reach different
+    conclusions. Now the plan hands over the memories it actually reasoned
+    from, together with the precedent measured on that same recall, so the badge
+    and the score are guaranteed to describe the same evidence.
+    """
+    decision_count = 0
+    outcome_count = 0
+
+    for text in memories:
+        if not _has_decision(text):
+            continue
+
+        decision_count += 1
+
+        if _has_outcome(text):
+            outcome_count += 1
+
+    outcome = (outcome_count / decision_count) if decision_count else 0.0
+    outcome = max(0.0, min(1.0, outcome))
+
+    return _build(
+        max(0.0, min(1.0, precedent)),
+        outcome,
+        decision_count,
+        outcome_count,
+    )
+
+
 def calculate_dri(stage: str, query: str) -> dict[str, Any]:
     """Calculate DRI = 100 * (0.6 * P + 0.4 * O).
 
@@ -99,7 +196,7 @@ def calculate_dri(stage: str, query: str) -> dict[str, Any]:
     """
     query = (query or "").strip()
     if not query:
-        return {"score": 0, "precedent": 0.0, "outcome": 0.0, "decision_memories": 0, "outcome_memories": 0}
+        return _build(0.0, 0.0, 0, 0)
 
     client = _client()
     try:
@@ -111,31 +208,9 @@ def calculate_dri(stage: str, query: str) -> dict[str, Any]:
 
         results = list(getattr(response, "results", []) or [])
 
-        rerankers = [s for s in (_score(r, "reranker") for r in results) if s is not None]
-        precedent = max(rerankers, default=0.0)
-        precedent = max(0.0, min(1.0, precedent))
-
-        decision_count = 0
-        outcome_count = 0
-        for result in results:
-            text = _text(result)
-            if not text or not _has_decision(text):
-                continue
-            decision_count += 1
-            if _has_outcome(text):
-                outcome_count += 1
-
-        outcome = (outcome_count / decision_count) if decision_count else 0.0
-        outcome = max(0.0, min(1.0, outcome))
-
-        score = round(100 * (0.6 * precedent + 0.4 * outcome))
-
-        return {
-            "score": score,
-            "precedent": precedent,
-            "outcome": outcome,
-            "decision_memories": decision_count,
-            "outcome_memories": outcome_count,
-        }
+        return _build(
+            _precedent(results),
+            *_outcome(results),
+        )
     finally:
         client.close()

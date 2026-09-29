@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import json
+import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, is_dataclass
 from datetime import date
@@ -131,6 +132,32 @@ def _safe_dri(stage: str, query: str) -> dict[str, Any]:
         return {"score": None, "precedent": 0.0, "outcome": 0.0, "error": str(exc)}
 
 
+async def _analyze_with_dri(stage: str, question: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Return the plan and its DRI from a single recall.
+
+    These used to be two independent Hindsight retrievals for the same query, so
+    the precedent badge and the reliability score could contradict each other
+    (e.g. "No direct precedent" beside a DRI of 74). One recall now feeds both.
+    """
+
+    memories, precedent = await call_agent(
+        agent.recall_with_precedent,
+        stage,
+        question,
+    )
+
+    plan = await call_agent(
+        agent.analyze,
+        stage,
+        question,
+        precedent=precedent,
+        memories=memories,
+    )
+    scored = await call_agent(dri.score_memories, memories, precedent)
+
+    return _to_jsonable(plan), scored
+
+
 # ============================================================
 # REQUEST MODELS
 # ============================================================
@@ -159,14 +186,50 @@ class PatternsRequest(BaseModel):
 
 
 # ============================================================
+# CREDENTIAL PREFLIGHT
+# ============================================================
+# Anyone who clones this repo gets no .env (it is gitignored on purpose), so the
+# first thing a fresh clone does is fail on a bare KeyError. Translate the two
+# required keys into one actionable message before the agent is ever called.
+REQUIRED_ENV = {
+    "HINDSIGHT_API_KEY": "Hindsight Cloud key - https://ui.hindsight.vectorize.io",
+    "GROQ_API_KEY": "Groq key - https://groq.com/ (free tier)",
+}
+
+
+def missing_env() -> list[str]:
+    """Names of required credentials that are absent or blank."""
+    return [key for key in REQUIRED_ENV if not os.getenv(key)]
+
+
+def require_env() -> None:
+    """Fail fast with setup instructions when credentials are missing."""
+    missing = missing_env()
+
+    if not missing:
+        return
+
+    lines = [
+        f"- {key}: {REQUIRED_ENV[key]}" for key in missing
+    ]
+    raise HTTPException(
+        status_code=503,
+        detail=(
+            "Missing credentials: "
+            + ", ".join(missing)
+            + ". Copy .env.example to .env, fill in the keys, then restart "
+            "the server. Full walkthrough in GUIDE.md."
+        ),
+    )
+
+
+# ============================================================
 # READ ENDPOINTS
 # ============================================================
 
 @app.get("/api/health")
 def health() -> dict[str, Any]:
     """Liveness probe that also reports whether credentials are configured."""
-
-    import os
 
     return {
         "status": "ok",
@@ -203,11 +266,13 @@ def list_events() -> list[dict[str, Any]]:
 
 
 async def get_dri(stage: str, query: str) -> dict[str, Any]:
+    require_env()
     return await call_agent(_safe_dri, stage, query)
 
 
 @app.post("/api/patterns")
 async def patterns(body: PatternsRequest) -> dict[str, str]:
+    require_env()
     text = await call_agent(agent.reflect_patterns, body.stage)
     return {"patterns": text}
 
@@ -215,12 +280,13 @@ async def patterns(body: PatternsRequest) -> dict[str, str]:
 @app.post("/api/analyze")
 async def analyze(body: AnalyzeRequest) -> dict[str, Any]:
     """Recall memory, generate a counter-plan, and score its reliability."""
-
+    require_env()
     stage = body.stage if body.stage in VALID_STAGES else "full"
     question = body.question.strip()
 
     try:
-        plan = await call_agent(agent.analyze, stage, question)
+        plan, scored = await _analyze_with_dri(stage, question)
+
     except Exception as exc:  # noqa: BLE001 - returned to the UI as a message
         raise HTTPException(
             status_code=502,
@@ -230,8 +296,8 @@ async def analyze(body: AnalyzeRequest) -> dict[str, Any]:
     return {
         "stage": stage,
         "question": question,
-        "plan": _to_jsonable(plan),
-        "dri": await call_agent(_safe_dri, stage, question),
+        "plan": plan,
+        "dri": scored,
     }
 
 
@@ -317,7 +383,19 @@ async def learn(body: LearnRequest) -> StreamingResponse:
             yield _sse("status", {"step": 4, "state": "active"})
 
             # --- STEP 4/5: re-run the analysis on the updated memory ----
-            updated_plan = await call_agent(agent.analyze, stage, request_text)
+            updated_memories, updated_precedent = await call_agent(
+                agent.recall_with_precedent,
+                stage,
+                request_text,
+            )
+
+            updated_plan = await call_agent(
+                agent.analyze,
+                stage,
+                request_text,
+                precedent=updated_precedent,
+                memories=updated_memories,
+            )
 
             yield _sse("status", {"step": 4, "state": "completed"})
             yield _sse("status", {"step": 5, "state": "completed"})
