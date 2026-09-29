@@ -19,6 +19,21 @@ company made last quarter.
 
 This agent remembers **your own trial and error**, not just the competitor's activity.
 
+## The proof: same question, opposite answer
+
+<div align="center">
+
+| 🔴 **Cold** — no memory | 🟢 **Full** — full history |
+|---|---|
+| ![Cold stage](docs/cold.png) | ![Full stage](docs/full.png) |
+| DRI **0/100** · 0 memories<br>"Launch a targeted promotion with modest discounts (5–7%)" | DRI **43/100** · 22 memories recalled, 4 cited<br>**"Do not match Sitara's 10% discount"** |
+
+</div>
+
+Nothing about the agent was retuned between these two — only the **memory it could
+recall** changed. With history, it cites the May attempt where matching Sitara's cuts
+**dropped operating margin from 7.9% → 6.6%**, and reaches the opposite conclusion.
+
 ## The core loop
 
 1. A new competitor move comes in.
@@ -143,6 +158,8 @@ It then shows **before vs after** recommendations, each with its own DRI, plus t
 validation checks confirming the newly saved decision was genuinely recalled and
 actually used as evidence.
 
+![Learning result](docs/learning-result.png)
+
 ## Project layout
 
 | File | Purpose |
@@ -172,3 +189,14 @@ actually used as evidence.
 - The dataset is **synthetic but realistic** (real-sounding company, real margin and
   footfall numbers) so the agent has a genuine history to reason over.
 - See `GUIDE.md` section 5 for the full list of known limitations.
+
+---
+
+📖 **Looking for depth?** See [`GUIDE.md`](GUIDE.md) for the full architecture, a
+step-by-step UI test plan, verified real-run outputs, and the rubric mapping.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+All companies, people, and figures in the demo dataset are fictional.
